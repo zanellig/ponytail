@@ -603,3 +603,22 @@ test('a waiting pick is a clock chip, labelled where the row has room, with the 
     await ui.unmount()
   }
 })
+
+test("the band shows its own session's level, not the shared flag another session wrote last", async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  const files: Record<string, string> = { '/home/u/.claude/.ponytail-active': 'full', '/home/u/.claude/ponytail-modes/session/s1': 'ultra' }
+  on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('session.id', () => ({ value: 's1' }))
+  on('session.repo', () => ({ value: { root: '/repo/shop' } }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('fs.read', ($, e) => (e.path in files ? { value: files[e.path] } : { deny: 'missing' }) as never)
+  const ui = await $.ui.mount({ plugin: 'ponytail', surface: 'terminal', ...BAND })
+  await $.session.start({ cwd: '/repo/shop', surface: null } as never)
+  expect(await ui.find({ key: 'level', text: /ultra/ })).toBeDefined()
+  // A session without its own file (started before this version) reads the shared flag.
+  delete files['/home/u/.claude/ponytail-modes/session/s1']
+  await $.session.start({ cwd: '/repo/shop', surface: null } as never)
+  expect(await ui.find({ key: 'level', text: /full/ })).toBeDefined()
+  await ui.unmount()
+})

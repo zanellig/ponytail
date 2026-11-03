@@ -94,16 +94,12 @@ async function bandHidden($: EngineInterface): Promise<boolean> {
   }
 }
 
-// The level ponytail's own hooks write. Absent flag = off.
-// shortcut: the shared flag the statusline reads, so two sessions in different repos show the last switch; read the per-project flag if that matters.
+// The level ponytail's own hooks write: this session's own, else the shared flag. Absent flag = off.
 async function readLevel($: EngineInterface): Promise<string> {
   const dir = await claudeDir($)
-  try {
-    const level = (await $.fs.read(`${dir}/.ponytail-active`)).trim()
-    return LEVELS.includes(level) ? level : 'off'
-  } catch {
-    return 'off'
-  }
+  const own = await $.fs.read(`${dir}/ponytail-modes/session/${await $.session.id()}`).catch(() => undefined)
+  const level = (own ?? (await $.fs.read(`${dir}/.ponytail-active`).catch(() => ''))).trim()
+  return LEVELS.includes(level) ? level : 'off'
 }
 
 // A level picked here waits for the session's next prompt, where the mode tracker applies it and empties the file.

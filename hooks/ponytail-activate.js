@@ -20,8 +20,10 @@ const {
   isCodex,
   isCopilot,
   isCursor,
+  pruneSessionFiles,
   readMode,
   setMode,
+  useSession,
   writeHookOutput,
 } = require('./ponytail-runtime');
 
@@ -186,7 +188,10 @@ function finish() {
   let source = '';
   try {
     // Strip UTF-8 BOM some shells prepend when piping (breaks JSON.parse)
-    source = JSON.parse(input.replace(/^\uFEFF/, '')).source;
+    const data = JSON.parse(input.replace(/^\uFEFF/, ''));
+    source = data.source;
+    useSession(data.session_id);
+    pruneSessionFiles();
   } catch (e) {
     // No payload, or an unparseable one: treat it as a fresh session
   }

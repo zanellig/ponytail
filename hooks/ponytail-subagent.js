@@ -11,23 +11,8 @@
 // "^general$" is exact. Unset means inject into every subagent, as before.
 
 const { getPonytailInstructions } = require('./ponytail-instructions');
-const { readMode, writeHookOutput } = require('./ponytail-runtime');
+const { readMode, useSession, writeHookOutput } = require('./ponytail-runtime');
 const vm = require('vm');
-
-const mode = readMode();
-
-// Absent flag or off → ponytail isn't active; inject nothing.
-if (!mode || mode === 'off') {
-  process.exit(0);
-}
-
-function inject() {
-  try {
-    writeHookOutput('SubagentStart', mode, getPonytailInstructions(mode));
-  } catch (e) {
-    // Silent fail — a stdout error at hook exit must not surface as a hook failure.
-  }
-}
 
 // A bad regex must never crash the hook; treat it as "no matcher" and inject.
 let matcherRe = null;
@@ -39,18 +24,11 @@ try {
   matcherRe = null;
 }
 
-// No matcher → keep the original synchronous, stdin-independent path. On Windows
-// the PowerShell `if {}` wrapper can swallow the piped JSON so stdin 'end' never
-// fires (#443); the default path must not wait on stdin or it would stall every
-// subagent spawn.
-if (!matcherRe) {
-  inject();
-  process.exit(0);
-}
-
-// Matcher set → read agent_type from stdin and skip only on a definite
-// mismatch. Missing/unparseable agent_type, a stdin error, or the timeout all
-// fail open (inject), so scoping never silently drops the persona.
+// stdin carries the parent's session_id, so the subagent gets its own session's
+// level, not the one a sibling session in the same repo switched to last. A stuck
+// stdin (#443) costs at most the fallback below, then the project flag decides.
+// With a matcher, agent_type scopes the injection: only a definite mismatch skips,
+// so scoping never silently drops the persona.
 let input = '';
 let done = false;
 
@@ -58,28 +36,36 @@ function finish() {
   if (done) return;
   done = true;
 
-  let agentType = '';
+  let data = {};
   try {
     // Strip UTF-8 BOM some shells prepend when piping (breaks JSON.parse)
-    agentType = String(JSON.parse(input.replace(/^\uFEFF/, '')).agent_type || '').trim();
+    data = JSON.parse(input.replace(/^\uFEFF/, '')) || {};
   } catch (e) {
-    // Unparseable payload — fall through and inject to be safe.
+    // No or unparseable payload: no session, no agent_type; inject by the project flag.
   }
+  useSession(data.session_id);
+  const mode = readMode();
+  // Absent flag or off → ponytail isn't active; inject nothing.
+  if (!mode || mode === 'off') return;
+
+  const agentType = String(data.agent_type || '').trim();
   // .test() is synchronous, so a backtracking-heavy matcher like (a+)+$ would
   // block the event loop and the fallback timer below could never fire (#658).
   // Run it under a vm timeout; a timeout fails open like every other doubt.
   let matches = true;
   try {
-    if (agentType) {
+    if (matcherRe && agentType) {
       matches = vm.runInNewContext('re.test(s)', { re: matcherRe, s: agentType }, { timeout: 100 });
     }
   } catch (e) {
     matches = true;
   }
-  if (!matches) {
-    process.exit(0);
+  if (!matches) return;
+  try {
+    writeHookOutput('SubagentStart', mode, getPonytailInstructions(mode));
+  } catch (e) {
+    // Silent fail — a stdout error at hook exit must not surface as a hook failure.
   }
-  inject();
 }
 
 process.stdin.on('data', chunk => { input += chunk; });

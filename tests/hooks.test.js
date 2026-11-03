@@ -1046,4 +1046,63 @@ assert.equal(
   assert.equal(fs.existsSync(pending), false);
 }
 
+// Two sessions in the same repo keep their own levels: every hook keys the level by
+// session_id, and the project and shared flags remain the fallback without one.
+{
+  const sessHome = path.join(temp, 'session-home');
+  const claude = path.join(sessHome, '.claude');
+  const own = (id) => path.join(claude, 'ponytail-modes', 'session', id);
+  const env = { HOME: sessHome, USERPROFILE: sessHome, CLAUDE_PROJECT_DIR: path.join(temp, 'same-repo'), PONYTAIL_DEFAULT_MODE: 'full' };
+  const hook = (script, payload) => run(script, env, JSON.stringify(payload));
+  const subagent = (session_id) => hook('ponytail-subagent.js', { session_id, agent_type: 'general-purpose' }).stdout;
+
+  hook('ponytail-activate.js', { source: 'startup', session_id: 'a' });
+  hook('ponytail-mode-tracker.js', { prompt: '/ponytail ultra', session_id: 'a' });
+  // B starts later in the same repo, at the default level.
+  hook('ponytail-activate.js', { source: 'startup', session_id: 'b' });
+  assert.equal(fs.readFileSync(own('a'), 'utf8'), 'ultra', 'a sibling start must not reset A');
+  assert.equal(fs.readFileSync(own('b'), 'utf8'), 'full');
+
+  // The level table keeps only the active level's row.
+  assert.match(subagent('a'), /\*\*ultra\*\*/, "A's subagents get A's level");
+  assert.doesNotMatch(subagent('b'), /\*\*ultra\*\*/, "B's subagents get B's level");
+  assert.match(subagent('b'), /\*\*full\*\*/);
+  assert.match(hook('ponytail-activate.js', { source: 'compact', session_id: 'a' }).stdout, /level: ultra/, 'A compacts at its own level');
+
+  // No stdin: the subagent falls back to the project flag, the last switch in this repo.
+  assert.match(run('ponytail-subagent.js', env, '').stdout, /SubagentStart/);
+
+  // An off is kept as "off", so A stays off after compaction while B goes on.
+  hook('ponytail-mode-tracker.js', { prompt: 'stop ponytail', session_id: 'a' });
+  assert.equal(fs.readFileSync(own('a'), 'utf8'), 'off');
+  assert.equal(hook('ponytail-activate.js', { source: 'compact', session_id: 'a' }).stdout, '');
+  assert.equal(subagent('a'), '');
+  assert.match(hook('ponytail-activate.js', { source: 'compact', session_id: 'b' }).stdout, /level: full/);
+
+  // The statusline shows its own session's level, and nothing for an off session.
+  const badge = (input) => spawnSync('bash', [path.join(root, 'hooks', 'ponytail-statusline.sh')], { env: { ...process.env, ...env, CLAUDE_CONFIG_DIR: claude }, input, encoding: 'utf8' }).stdout;
+  hook('ponytail-mode-tracker.js', { prompt: '/ponytail lite', session_id: 'b' });
+  assert.match(badge(JSON.stringify({ session_id: 'b', model: {} })), /PONYTAIL:LITE/);
+  assert.equal(badge(JSON.stringify({ session_id: 'a' })), '');
+  assert.match(badge('{"session_id":"unknown"}'), /PONYTAIL:LITE/, 'an unknown session reads the shared flag');
+
+  // A session start sweeps session files untouched for 30 days and picks older than a
+  // day, and keeps its own file however old.
+  const pickDir = path.join(claude, 'ponytail-pending');
+  fs.mkdirSync(pickDir, { recursive: true });
+  fs.writeFileSync(path.join(pickDir, 'fresh'), 'ultra');
+  fs.writeFileSync(path.join(pickDir, 'stale'), 'ultra');
+  fs.writeFileSync(own('old'), 'lite');
+  const age = (file, days) => fs.utimesSync(file, new Date(Date.now() - days * 864e5), new Date(Date.now() - days * 864e5));
+  age(path.join(pickDir, 'stale'), 2);
+  age(own('old'), 31);
+  age(own('b'), 31);
+  hook('ponytail-activate.js', { source: 'compact', session_id: 'b' });
+  assert.equal(fs.existsSync(own('old')), false);
+  assert.equal(fs.existsSync(path.join(pickDir, 'stale')), false);
+  assert.equal(fs.existsSync(path.join(pickDir, 'fresh')), true);
+  assert.equal(fs.existsSync(own('a')), true);
+  assert.equal(fs.readFileSync(own('b'), 'utf8'), 'lite', 'a session keeps its own file');
+}
+
 console.log('hook compatibility checks passed');

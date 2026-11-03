@@ -46,8 +46,6 @@ const statePath = path.join(stateDir, STATE_FILE);
 // Claude Code hands every hook its project dir, so the live mode is kept per
 // project and concurrent sessions in different repos stop overwriting each other
 // (#662, #809). Hosts without it keep the single shared flag.
-// ponytail: sessions in the SAME repo still share one mode, and the statusline
-// scripts read the shared flag (last write wins); key by session_id if either matters.
 const projectDir = (process.env.CLAUDE_PROJECT_DIR || '').trim();
 // Replacing separators with '_' aliases e.g. /work/a/b and /work/a_b (#662).
 // Do not read old sanitized keys: they cannot be assigned to one project safely.
@@ -56,35 +54,81 @@ const projectStatePath = projectDir
     createHash('sha256').update(path.normalize(projectDir)).digest('hex'))
   : null;
 
-// The shared flag is still written, for the statusline and project-less hosts.
-function setMode(mode) {
-  for (const file of [projectStatePath, statePath]) {
-    if (!file) continue;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, mode);
+// A file per session under <state dir>/<dir>/, for hooks that know their session id.
+const sessionFile = (dir, sessionId) =>
+  /^[\w-]+$/.test(String(sessionId || '')) ? path.join(stateDir, dir, sessionId) : null;
+
+// Claude Code passes session_id on stdin to every hook and to the statusline, so a
+// hook that calls useSession() keeps the level per session: two sessions in the same
+// repo keep their own levels. Without an id, the per-project and shared flags apply.
+let sessionStatePath = null;
+function useSession(sessionId) {
+  sessionStatePath = sessionFile(path.join('ponytail-modes', 'session'), sessionId);
+}
+
+// Session levels and band picks outlive their sessions, so every session start sweeps
+// the stale ones. Never throws: a sweep must not cost the session its ruleset.
+// shortcut: age by mtime, which only moves on a switch, so a session that runs 30 days
+// without one falls back to the project level on its next compaction.
+const DAY = 24 * 60 * 60 * 1000;
+function pruneSessionFiles(now = Date.now()) {
+  for (const [dir, maxAge] of [
+    [path.join(stateDir, 'ponytail-modes', 'session'), 30 * DAY],
+    // A pick nobody followed with a prompt is worth nothing a day later.
+    [path.join(stateDir, 'ponytail-pending'), DAY],
+  ]) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch (e) { continue; }
+    for (const name of names) {
+      const file = path.join(dir, name);
+      if (file === sessionStatePath) continue;
+      // A sibling session starting at the same moment may delete it first.
+      try {
+        if (now - fs.statSync(file).mtimeMs > maxAge) fs.unlinkSync(file);
+      } catch (e) {}
+    }
   }
 }
 
+// The project and shared flags are still written, for the statusline and for hooks
+// and hosts without a session id.
+function setMode(mode) {
+  for (const file of [sessionStatePath, projectStatePath, statePath]) {
+    if (file) setModeFile(file, mode);
+  }
+}
+
+// A session's off is written as "off", not deleted: a missing session file falls
+// back to the project flag, which another session may have set.
 function clearMode() {
+  if (sessionStatePath) setModeFile(sessionStatePath, 'off');
   for (const file of [projectStatePath, statePath]) {
     if (file) try { fs.unlinkSync(file); } catch (e) {}
   }
 }
 
-// Live mode written by activate/mode-tracker. Absent flag = ponytail off.
+function setModeFile(file, mode) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, mode);
+}
+
+// Live mode written by activate/mode-tracker: the session's own, else the project's,
+// else the shared flag. Absent flag = ponytail off.
 function readMode() {
-  try {
-    return fs.readFileSync(projectStatePath || statePath, 'utf8').trim() || null;
-  } catch (e) {
-    return null;
+  for (const file of [sessionStatePath, projectStatePath || statePath]) {
+    if (!file) continue;
+    try {
+      return fs.readFileSync(file, 'utf8').trim() || null;
+    } catch (e) {}
   }
+  return null;
 }
 
 // A level picked in the band (hooks/band) waits in ponytail-pending/<session id> until
 // the session's next prompt. Reading it consumes it; empty means the pick was taken back.
 function takePendingMode(sessionId) {
-  if (!/^[\w-]+$/.test(String(sessionId || ''))) return null;
-  const file = path.join(stateDir, 'ponytail-pending', sessionId);
+  const file = sessionFile('ponytail-pending', sessionId);
+  if (!file) return null;
   let mode = null;
   try {
     mode = fs.readFileSync(file, 'utf8').trim();
@@ -191,6 +235,8 @@ module.exports = {
   isQoder,
   readMode,
   setMode,
+  pruneSessionFiles,
   takePendingMode,
+  useSession,
   writeHookOutput,
 };

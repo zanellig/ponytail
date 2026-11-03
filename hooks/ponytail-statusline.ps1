@@ -1,6 +1,15 @@
 # CLAUDE_CONFIG_DIR overrides ~/.claude, matching where the hooks write the flag (issue #34)
 $ClaudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
 $Flag = Join-Path $ClaudeDir ".ponytail-active"
+# Claude Code hands the statusline its session as JSON on stdin; that session's own
+# level wins over the shared flag, which shows whichever session switched last.
+if ([Console]::IsInputRedirected) {
+    $In = [Console]::In.ReadToEnd()
+    if ($In -match '"session_id"\s*:\s*"([A-Za-z0-9_-]+)"') {
+        $SessionFlag = Join-Path (Join-Path (Join-Path $ClaudeDir "ponytail-modes") "session") $Matches[1]
+        if (Test-Path $SessionFlag) { $Flag = $SessionFlag }
+    }
+}
 if (-not (Test-Path $Flag)) {
     exit 0
 }
@@ -9,6 +18,9 @@ $Mode = ""
 try {
     $Mode = (Get-Content $Flag -ErrorAction Stop | Select-Object -First 1).Trim()
 } catch {
+    exit 0
+}
+if ($Mode -eq "off") {
     exit 0
 }
 

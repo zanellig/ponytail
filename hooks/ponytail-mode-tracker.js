@@ -18,6 +18,7 @@ const {
   readMode,
   setMode,
   takePendingMode,
+  useSession,
   writeHookOutput,
 } = require('./ponytail-runtime');
 const { getPonytailInstructions } = require('./ponytail-instructions');
@@ -34,6 +35,7 @@ function finish() {
   try {
     // Strip UTF-8 BOM some shells prepend when piping (breaks JSON.parse)
     const data = JSON.parse(input.replace(/^\uFEFF/, ''));
+    useSession(data.session_id);
     let prompt = (data.prompt || '').trim().toLowerCase();
 
     // A level picked in the band applies with this prompt, as if the user had typed it:
